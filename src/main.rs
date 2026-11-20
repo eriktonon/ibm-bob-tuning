@@ -119,9 +119,7 @@ struct BobCustomModeEntry {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let repo_root = resolve_repo_root(cli.repo.as_deref()).map_err(std::io::Error::other)?;
     let home = resolve_home_dir().map_err(std::io::Error::other)?;
-    let policy = load_policy(&repo_root).map_err(std::io::Error::other)?;
 
     match cli.command {
         Commands::Status { workspace } => {
@@ -130,25 +128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Backup => {
             let bak = backup_bob_settings(&home).map_err(std::io::Error::other)?;
             println!("[OK] SHA-256 backup saved at: {}", bak.display());
-        }
-        Commands::Sync {
-            workspace,
-            all_modes,
-            model,
-            no_turbo,
-            dry_run,
-        } => {
-            sync_bob(
-                &repo_root,
-                &home,
-                &policy,
-                &workspace,
-                all_modes,
-                model.as_deref(),
-                !no_turbo,
-                dry_run,
-            )
-            .map_err(std::io::Error::other)?;
         }
         Commands::SetModel { model } => {
             let normalized = normalize_model_arg(&model);
@@ -169,10 +148,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bak.display()
             );
         }
+        Commands::Sync {
+            workspace,
+            all_modes,
+            model,
+            no_turbo,
+            dry_run,
+        } => {
+            let repo_root =
+                resolve_repo_root(cli.repo.as_deref(), &home).map_err(std::io::Error::other)?;
+            let policy = load_policy(&repo_root).map_err(std::io::Error::other)?;
+            sync_bob(
+                &repo_root,
+                &home,
+                &policy,
+                &workspace,
+                all_modes,
+                model.as_deref(),
+                !no_turbo,
+                dry_run,
+            )
+            .map_err(std::io::Error::other)?;
+        }
         Commands::Validate => {
+            let repo_root =
+                resolve_repo_root(cli.repo.as_deref(), &home).map_err(std::io::Error::other)?;
+            let policy = load_policy(&repo_root).map_err(std::io::Error::other)?;
             validate_repo(&repo_root, &policy).map_err(std::io::Error::other)?;
         }
         Commands::Mcp => {
+            let repo_root =
+                resolve_repo_root(cli.repo.as_deref(), &home).map_err(std::io::Error::other)?;
             run_mcp_stdio_server(&repo_root).map_err(std::io::Error::other)?;
         }
     }
@@ -205,7 +211,7 @@ fn resolve_home_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "Could not resolve HOME / USERPROFILE environment variable".to_string())
 }
 
-fn resolve_repo_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
+fn resolve_repo_root(explicit: Option<&Path>, home: &Path) -> Result<PathBuf, String> {
     if let Some(p) = explicit {
         return Ok(canonicalize_clean(p));
     }
@@ -219,6 +225,10 @@ fn resolve_repo_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
         if cwd.join("agents").is_dir() && cwd.join("config").join("turbo-policy.json").is_file() {
             return Ok(canonicalize_clean(&cwd));
         }
+        let sub = cwd.join("ibm-bob-tuning");
+        if sub.join("agents").is_dir() && sub.join("config").join("turbo-policy.json").is_file() {
+            return Ok(canonicalize_clean(&sub));
+        }
     }
     if let Ok(exe) = std::env::current_exe() {
         let mut cur = exe.parent();
@@ -229,6 +239,19 @@ fn resolve_repo_root(explicit: Option<&Path>) -> Result<PathBuf, String> {
             }
             cur = dir.parent();
         }
+    }
+    let repo_marker = home.join(".bob").join("settings").join(".repo-root");
+    if let Ok(saved) = fs::read_to_string(&repo_marker) {
+        let p = PathBuf::from(saved.trim());
+        if p.join("agents").is_dir() {
+            return Ok(canonicalize_clean(&p));
+        }
+    }
+    let compile_time_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if compile_time_dir.join("agents").is_dir()
+        && compile_time_dir.join("config").join("turbo-policy.json").is_file()
+    {
+        return Ok(canonicalize_clean(&compile_time_dir));
     }
     Err("Could not locate ibm-bob-tuning repository root. Pass --repo <path> or set BOB_TUNING_REPO.".to_string())
 }
@@ -811,22 +834,52 @@ fn find_rea_script(home: &Path, node_path: Option<&Path>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file()).map(|p| canonicalize_clean(&p))
 }
 
-fn build_global_mcp_json(repo_root: &Path, home: &Path) -> (Value, Vec<String>) {
+fn is_broken_npm_fetch_entry(entry: &Value) -> bool {
+    entry
+        .get("args")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .any(|s| s.contains("@modelcontextprotocol/server-fetch"))
+        })
+        .unwrap_or(false)
+}
+
+fn build_global_mcp_json(
+    repo_root: &Path,
+    home: &Path,
+    existing_mcp: &Map<String, Value>,
+) -> (Value, Vec<String>) {
     let abs_repo = canonicalize_clean(repo_root);
     let mut servers = Map::new();
-    let mut registered = Vec::new();
+
+    if let Some(prev_servers) = existing_mcp.get("mcpServers").and_then(|v| v.as_object()) {
+        for (k, v) in prev_servers {
+            if k == "fetch" && is_broken_npm_fetch_entry(v) {
+                continue;
+            }
+            servers.insert(k.clone(), v.clone());
+        }
+    }
 
     // 1. Native Rust MCP server (`bob-tuner mcp`) — zero runtime dependencies
-    let exe = std::env::current_exe()
-        .map(|p| canonicalize_clean(&p))
-        .unwrap_or_else(|_| {
-            let bin = if cfg!(windows) {
-                "bob-tuner.exe"
-            } else {
-                "bob-tuner"
-            };
-            abs_repo.join("target").join("release").join(bin)
-        });
+    let bin_name = if cfg!(windows) {
+        "bob-tuner.exe"
+    } else {
+        "bob-tuner"
+    };
+    let repo_bin = abs_repo.join("target").join("release").join(bin_name);
+    let cargo_bin = home.join(".cargo").join("bin").join(bin_name);
+    let exe = if repo_bin.is_file() {
+        canonicalize_clean(&repo_bin)
+    } else if cargo_bin.is_file() {
+        canonicalize_clean(&cargo_bin)
+    } else {
+        std::env::current_exe()
+            .map(|p| canonicalize_clean(&p))
+            .unwrap_or(repo_bin)
+    };
     servers.insert(
         "pe-agents-ibm".to_string(),
         json!({
@@ -843,7 +896,6 @@ fn build_global_mcp_json(repo_root: &Path, home: &Path) -> (Value, Vec<String>) 
             ]
         }),
     );
-    registered.push("pe-agents-ibm".to_string());
 
     // 2. Optional auto-detected host MCPs (only registered when binaries exist locally)
     let node_bin = if cfg!(windows) {
@@ -894,7 +946,6 @@ fn build_global_mcp_json(repo_root: &Path, home: &Path) -> (Value, Vec<String>) 
                 ]
             }),
         );
-        registered.push("rea".to_string());
     }
 
     if let Some(npx) = &npx_bin {
@@ -917,18 +968,6 @@ fn build_global_mcp_json(repo_root: &Path, home: &Path) -> (Value, Vec<String>) 
                 ]
             }),
         );
-        registered.push("chrome-devtools".to_string());
-
-        servers.insert(
-            "fetch".to_string(),
-            json!({
-                "command": npx.to_string_lossy(),
-                "args": ["-y", "@modelcontextprotocol/server-fetch"],
-                "timeout": 60000,
-                "alwaysAllow": ["fetch"]
-            }),
-        );
-        registered.push("fetch".to_string());
     }
 
     let go_bin = if cfg!(windows) {
@@ -953,9 +992,9 @@ fn build_global_mcp_json(repo_root: &Path, home: &Path) -> (Value, Vec<String>) 
                 ]
             }),
         );
-        registered.push("gopls".to_string());
     }
 
+    let registered: Vec<String> = servers.keys().cloned().collect();
     (json!({ "mcpServers": servers }), registered)
 }
 
@@ -1106,7 +1145,8 @@ fn sync_bob(
 
     let skills_count = sync_skills_dir(repo_root, home, dry_run)?;
 
-    let (mcp_val, mcp_names) = build_global_mcp_json(repo_root, home);
+    let existing_mcp = read_json_object_or_empty(&mcp_path)?;
+    let (mcp_val, mcp_names) = build_global_mcp_json(repo_root, home, &existing_mcp);
     let mcp_text = serde_json::to_string_pretty(&mcp_val)
         .map_err(|e| format!("Failed serializing mcp.json: {}", e))?;
     if mcp_text.contains("${") {
@@ -1114,6 +1154,11 @@ fn sync_bob(
     }
     if !dry_run {
         write_text_atomic(&mcp_path, &format!("{}\n", mcp_text))?;
+        let repo_marker = settings_dir.join(".repo-root");
+        write_text_atomic(
+            &repo_marker,
+            &format!("{}\n", canonicalize_clean(repo_root).display()),
+        )?;
     }
 
     let mut ws_results = Vec::new();

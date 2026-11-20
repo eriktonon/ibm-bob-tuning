@@ -52,12 +52,12 @@ Ask the user (or infer from current workspace) which project workspace path(s) t
 
 - **Windows (PowerShell):**
   ```powershell
-  # Replace C:\path\to\project with the user's actual workspace path(s), or omit -Workspace for global-only
-  .\scripts\install.ps1 -Workspace C:\path\to\project
+  # Always wrap the workspace path in double quotes (especially if it contains spaces)
+  .\scripts\install.ps1 -Workspace "C:\path\to\project"
   ```
 - **macOS / Linux (Bash):**
   ```bash
-  ./scripts/install.sh --workspace /path/to/project
+  ./scripts/install.sh --workspace "/path/to/project"
   ```
 
 ### Optional Flags (only pass if requested by the user)

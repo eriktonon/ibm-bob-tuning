@@ -226,13 +226,36 @@ function findReaScript(nodeBin) {
   return cands.find((p) => fs.existsSync(p)) || null;
 }
 
-function buildMcpJson() {
+function isBrokenNpmFetch(entry) {
+  return (
+    entry &&
+    Array.isArray(entry.args) &&
+    entry.args.some((a) => typeof a === "string" && a.includes("@modelcontextprotocol/server-fetch"))
+  );
+}
+
+function buildMcpJson(existingMcp) {
   const isWin = process.platform === "win32";
   const servers = {};
 
+  if (existingMcp && existingMcp.mcpServers && typeof existingMcp.mcpServers === "object") {
+    for (const [k, v] of Object.entries(existingMcp.mcpServers)) {
+      if (k === "fetch" && isBrokenNpmFetch(v)) continue;
+      servers[k] = v;
+    }
+  }
+
   // Prefer compiled Rust binary if present; otherwise use zero-deps Node MCP server
-  const rustBin = path.join(REPO_ROOT, "target", "release", isWin ? "bob-tuner.exe" : "bob-tuner");
-  if (fs.existsSync(rustBin)) {
+  const binName = isWin ? "bob-tuner.exe" : "bob-tuner";
+  const repoRustBin = path.join(REPO_ROOT, "target", "release", binName);
+  const cargoRustBin = path.join(HOME, ".cargo", "bin", binName);
+  const rustBin = fs.existsSync(repoRustBin)
+    ? repoRustBin
+    : fs.existsSync(cargoRustBin)
+      ? cargoRustBin
+      : null;
+
+  if (rustBin) {
     servers["pe-agents-ibm"] = {
       command: rustBin,
       args: ["mcp", "--repo", REPO_ROOT],
@@ -279,12 +302,6 @@ function buildMcpJson() {
         "get_console_message", "list_network_requests", "get_network_request",
         "get_css_styles", "lighthouse_audit",
       ],
-    };
-    servers.fetch = {
-      command: npxBin,
-      args: ["-y", "@modelcontextprotocol/server-fetch"],
-      timeout: 60000,
-      alwaysAllow: ["fetch"],
     };
   }
   if (goBin) {
@@ -364,7 +381,8 @@ function syncCommand(opts) {
   existing.isCommandSecurityEnabled = policy.isCommandSecurityEnabled;
 
   const { yaml, count: modesCount } = buildCustomModesYaml(agents, policy, opts.allModes);
-  const mcpObj = buildMcpJson();
+  const existingMcp = fs.existsSync(mcpPath) ? JSON.parse(fs.readFileSync(mcpPath, "utf8")) : {};
+  const mcpObj = buildMcpJson(existingMcp);
   const mcpText = JSON.stringify(mcpObj, null, 2) + "\n";
   if (mcpText.includes("${")) throw new Error("mcp.json must not contain ${VAR} templates");
 
@@ -385,6 +403,7 @@ function syncCommand(opts) {
     writeAtomic(modesPath, yaml);
     if (fs.existsSync(ruleSrc)) writeAtomic(ruleDst, fs.readFileSync(ruleSrc, "utf8"));
     writeAtomic(mcpPath, mcpText);
+    writeAtomic(path.join(settingsDir, ".repo-root"), REPO_ROOT + "\n");
   }
 
   const wsSummary = [];

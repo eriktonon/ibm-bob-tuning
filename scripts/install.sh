@@ -8,14 +8,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 SKIP_RUST=0
+DRY_RUN=0
 SYNC_ARGS=()
+
+if [[ -d "${HOME}/.cargo/bin" ]] && [[ ":${PATH}:" != *":${HOME}/.cargo/bin:"* ]]; then
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --skip-rust) SKIP_RUST=1; shift ;;
     --workspace|--model) SYNC_ARGS+=("$1" "$2"); shift 2 ;;
-    --all-modes|--no-turbo|--dry-run) SYNC_ARGS+=("$1"); shift ;;
-    *) echo "Unknown option: $1" >&2; exit 2 ;;
+    --dry-run) DRY_RUN=1; SYNC_ARGS+=("$1"); shift ;;
+    --all-modes|--no-turbo) SYNC_ARGS+=("$1"); shift ;;
+    *) echo "Unknown option: $1 (Remember to quote workspace paths containing spaces: --workspace \"/path/to/project\")" >&2; exit 2 ;;
   esac
 done
 
@@ -29,6 +35,11 @@ if [[ "${SKIP_RUST}" -eq 0 ]] && command -v cargo >/dev/null 2>&1; then
   echo "[1/2] Rust/Cargo detected -> compiling native bob-tuner (release)..."
   if (cd "${REPO_ROOT}" && cargo build --release); then
     BIN="${REPO_ROOT}/target/release/bob-tuner"
+    if [[ "${DRY_RUN}" -eq 0 ]] && [[ -x "${BIN}" ]]; then
+      mkdir -p "${HOME}/.cargo/bin"
+      cp -f "${BIN}" "${HOME}/.cargo/bin/bob-tuner" 2>/dev/null || true
+      chmod +x "${HOME}/.cargo/bin/bob-tuner" 2>/dev/null || true
+    fi
     echo "[2/2] Running native bob-tuner sync..."
     "${BIN}" --repo "${REPO_ROOT}" sync "${SYNC_ARGS[@]}"
     "${BIN}" --repo "${REPO_ROOT}" validate
@@ -54,4 +65,4 @@ echo "[DONE] Next step inside IBM Bob IDE:"
 echo "  1. Press Cmd/Ctrl+Shift+P -> 'Developer: Reload Window' (loads all MCP servers)"
 echo "  2. Open a new chat (+) — 'PE-AGENTS-IBM Orquestrador' is now default"
 echo "  3. For any additional project folder, run:"
-echo "     ./scripts/install.sh --workspace /path/to/your/project"
+echo "     ./scripts/install.sh --workspace \"/path/to/your/project\""
