@@ -1,0 +1,15 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# OS & Editor junk
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+.env
+.env.*
+
+# Local workspace Bob runtime caches
+.bob/agents-legacy-backup/
+.bob/settings.json.bak

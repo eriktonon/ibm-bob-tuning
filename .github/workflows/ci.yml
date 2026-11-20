@@ -1,0 +1,43 @@
+name: CI — IBM Bob Tuning
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate-and-dlp:
+    name: Validate Assets, MCP Stdio E2E & DLP Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate agents, skills, turbo-policy and DLP leak gate
+        run: |
+          node scripts/bob-sync.mjs validate
+          node scripts/bob-sync.mjs dlp-audit
+      - name: Dry-run installer sync (zero-deps fallback)
+        run: node scripts/bob-sync.mjs sync --dry-run
+
+  rust-test-build:
+    name: Rust CLI Test & Build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust unit tests
+        run: cargo test -- --nocapture
+      - name: Build release binary
+        run: cargo build --release
+      - name: Smoke test compiled binary
+        run: |
+          ./target/release/bob-tuner validate
+          ./target/release/bob-tuner sync --dry-run
+        shell: bash
