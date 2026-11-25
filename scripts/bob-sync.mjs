@@ -12,16 +12,47 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, "..");
 const HOME = os.homedir();
-const POLICY_PATH = path.join(REPO_ROOT, "config", "turbo-policy.json");
+const CLI_VERSION = "1.0.0";
+
+function isRepoRoot(dir) {
+  return (
+    Boolean(dir) &&
+    fs.existsSync(path.join(dir, "agents")) &&
+    fs.existsSync(path.join(dir, "config", "turbo-policy.json"))
+  );
+}
+
+function resolveRepoRoot(explicitRepo) {
+  if (explicitRepo) {
+    return path.resolve(explicitRepo);
+  }
+  const envRepo = (process.env.BOB_TUNING_REPO || "").trim();
+  if (envRepo && isRepoRoot(envRepo)) {
+    return path.resolve(envRepo);
+  }
+  const scriptParent = path.resolve(__dirname, "..");
+  if (isRepoRoot(scriptParent)) {
+    return scriptParent;
+  }
+  const markerPath = path.join(HOME, ".bob", "settings", ".repo-root");
+  if (fs.existsSync(markerPath)) {
+    const saved = fs.readFileSync(markerPath, "utf8").trim();
+    if (saved && isRepoRoot(saved)) {
+      return path.resolve(saved);
+    }
+  }
+  return scriptParent;
+}
+
+let REPO_ROOT = resolveRepoRoot();
 const VALID_GROUPS = new Set([
   "read", "edit", "execute", "mcp", "skill", "todo", "artifact", "subagent", "mode",
 ]);
 const MODEL_TIERS = new Set(["fast", "premium", "ultra", "explorer"]);
 
 function loadPolicy() {
-  return JSON.parse(fs.readFileSync(POLICY_PATH, "utf8"));
+  return JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "config", "turbo-policy.json"), "utf8"));
 }
 
 function sanitizeAscii(input) {
@@ -544,45 +575,205 @@ function dlpAuditCommand() {
   console.log("[PASS] DLP Audit: 0 leaks (0 private IPs, 0 client mentions, 0 homelab refs, 0 other-IDE clutter, 0 secrets).");
 }
 
-function parseArgs(argv) {
-  const cmd = argv[2] || "status";
-  const opts = { workspaces: [], allModes: false, noTurbo: false, dryRun: false, model: undefined };
-  for (let i = 3; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--workspace" && argv[i + 1]) opts.workspaces.push(argv[++i]);
-    else if (a === "--all-modes") opts.allModes = true;
-    else if (a === "--no-turbo") opts.noTurbo = true;
-    else if (a === "--dry-run") opts.dryRun = true;
-    else if (a === "--model" && argv[i + 1]) opts.model = argv[++i];
-    else if (cmd === "set-model" && opts.model === undefined) opts.model = a;
+function printHelp() {
+  console.log(`bob-tuner ${CLI_VERSION} (zero-dependency Node.js runtime)
+Native tuning, PE-AGENTS-IBM agent compiler, safe Turbo Mode & MCP server for IBM Bob v2.1.0+
+
+Usage: bob-tuner [OPTIONS] <COMMAND>
+
+Commands:
+  status      Print diagnostic audit of IBM Bob configuration, modes, MCPs, skills, rules, and workspace agents
+  backup      Create a SHA-256 verified backup of ~/.bob/settings/
+  sync        Apply full IBM Bob tuning (safe Turbo Mode, curated modes, native agents, skills, rules, and MCPs)
+  set-model   Set or reset session.model in ~/.bob/settings/settings.json (e.g. claude-opus-4-6 or default)
+  validate    Validate repository policy, agents (Bob TFi parser parity), skills, and Node MCP E2E
+  dlp-audit   Run DLP leak gate across repository assets
+  mcp         Run the standalone JSON-RPC 2.0 stdio MCP server (pe-agents-ibm)
+
+Options:
+  --repo <PATH>       Path to the ibm-bob-tuning repository root (auto-detected if omitted)
+  --workspace <PATH>  Target workspace directory (repeatable; used by sync/status)
+  --all-modes         Expose all agents in custom_modes.yaml instead of the 7 curated modes
+  --model <ID>        Optional session.model override during sync
+  --no-turbo          Skip writing Turbo Mode auto-approval rules into settings.json
+  --dry-run           Simulate sync changes without writing files
+  -h, --help          Print help
+  -V, --version       Print version`);
+}
+
+function statusCommand(opts) {
+  const settingsDir = path.join(HOME, ".bob", "settings");
+  const sp = path.join(settingsDir, "settings.json");
+  const cm = path.join(settingsDir, "custom_modes.yaml");
+  const mp = path.join(settingsDir, "mcp.json");
+  const rulesDir = path.join(HOME, ".bob", "rules");
+  const skillsDir = path.join(HOME, ".bob", "skills");
+
+  console.log("================================================================================");
+  console.log("IBM BOB v2.1.0 — CONFIGURATION AUDIT");
+  console.log("================================================================================");
+
+  if (fs.existsSync(sp)) {
+    const obj = JSON.parse(fs.readFileSync(sp, "utf8"));
+    const defaultMode = obj?.session?.defaultMode || "(default: agent)";
+    const model = typeof obj?.session?.model === "string" ? obj.session.model : "";
+    const autoApprove = Boolean(obj?.approval?.autoApprovalEnabled);
+    const firstExec = Array.isArray(obj?.approval?.allowedExecutors) ? obj.approval.allowedExecutors[0] : null;
+    const allowCnt = Array.isArray(firstExec?.approvedCommands) ? firstExec.approvedCommands.length : 0;
+    const denyCnt = Array.isArray(firstExec?.deniedCommands) ? firstExec.deniedCommands.length : 0;
+    console.log(`  settings.json:     ${sp}`);
+    console.log(`    defaultMode:     ${defaultMode}`);
+    console.log(`    session.model:   ${model || '"" (premium-ide)'}`);
+    console.log(`    autoApproval:    ${autoApprove ? "ON" : "OFF"} (allow=${allowCnt}, deny=${denyCnt})`);
+  } else {
+    console.log("  settings.json:     MISSING");
   }
-  return { cmd, opts };
+
+  if (fs.existsSync(cm)) {
+    const raw = fs.readFileSync(cm, "utf8");
+    const cnt = (raw.match(/^\s*-\s+slug:/gm) || []).length;
+    console.log(`  custom_modes.yaml: ${cnt} mode(s)`);
+  } else {
+    console.log("  custom_modes.yaml: MISSING");
+  }
+
+  if (fs.existsSync(mp)) {
+    const obj = JSON.parse(fs.readFileSync(mp, "utf8"));
+    const names = obj?.mcpServers && typeof obj.mcpServers === "object" ? Object.keys(obj.mcpServers) : [];
+    console.log(`  mcp.json:          ${names.length} server(s): [${names.join(", ")}]`);
+  } else {
+    console.log("  mcp.json:          MISSING");
+  }
+
+  const rulesCnt = fs.existsSync(rulesDir)
+    ? fs.readdirSync(rulesDir, { withFileTypes: true }).filter((d) => d.isFile()).length
+    : 0;
+  const skillsCnt = fs.existsSync(skillsDir)
+    ? fs
+        .readdirSync(skillsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && fs.existsSync(path.join(skillsDir, d.name, "SKILL.md"))).length
+    : 0;
+  console.log(`  ~/.bob/rules:      ${rulesCnt} file(s)`);
+  console.log(`  ~/.bob/skills:     ${skillsCnt} skill(s)`);
+
+  for (const ws of opts.workspaces) {
+    const adir = path.join(path.resolve(ws), ".bob", "agents");
+    const cnt = fs.existsSync(adir)
+      ? fs.readdirSync(adir).filter((f) => f.endsWith(".md") && !f.endsWith(".agent.md")).length
+      : 0;
+    console.log(`  WS .bob/agents:    ${cnt} agent(s) in ${ws}`);
+  }
+  console.log("================================================================================");
+}
+
+function mcpCommand() {
+  const mcpScript = path.join(REPO_ROOT, "scripts", "pe-agents-ibm-mcp.mjs");
+  if (!fs.existsSync(mcpScript)) {
+    console.error(`[ERROR] MCP script not found: ${mcpScript}`);
+    process.exit(1);
+  }
+  const res = spawnSync(process.execPath, [mcpScript, "--repo", REPO_ROOT], { stdio: "inherit" });
+  process.exit(res.status ?? 0);
+}
+
+function parseArgs(argv) {
+  const tokens = argv.slice(2);
+  let cmd = null;
+  const opts = {
+    repo: undefined,
+    workspaces: [],
+    allModes: false,
+    noTurbo: false,
+    dryRun: false,
+    model: undefined,
+    help: false,
+    version: false,
+  };
+
+  for (let i = 0; i < tokens.length; i++) {
+    const a = tokens[i];
+    if (a === "-h" || a === "--help") {
+      opts.help = true;
+    } else if (a === "-V" || a === "--version") {
+      opts.version = true;
+    } else if (a === "--repo") {
+      if (i + 1 >= tokens.length) {
+        console.error("[ERROR] Missing value for --repo");
+        process.exit(2);
+      }
+      opts.repo = tokens[++i];
+    } else if (a.startsWith("--repo=")) {
+      opts.repo = a.slice("--repo=".length);
+    } else if (a === "--workspace") {
+      if (i + 1 >= tokens.length) {
+        console.error("[ERROR] Missing value for --workspace");
+        process.exit(2);
+      }
+      opts.workspaces.push(tokens[++i]);
+    } else if (a.startsWith("--workspace=")) {
+      opts.workspaces.push(a.slice("--workspace=".length));
+    } else if (a === "--all-modes") {
+      opts.allModes = true;
+    } else if (a === "--no-turbo") {
+      opts.noTurbo = true;
+    } else if (a === "--dry-run") {
+      opts.dryRun = true;
+    } else if (a === "--model") {
+      if (i + 1 >= tokens.length) {
+        console.error("[ERROR] Missing value for --model");
+        process.exit(2);
+      }
+      opts.model = tokens[++i];
+    } else if (a.startsWith("--model=")) {
+      opts.model = a.slice("--model=".length);
+    } else if (!cmd && !a.startsWith("-")) {
+      cmd = a;
+    } else if (cmd === "set-model" && opts.model === undefined && !a.startsWith("-")) {
+      opts.model = a;
+    } else {
+      console.error(`[ERROR] Unknown argument: ${a}`);
+      process.exit(2);
+    }
+  }
+
+  return { cmd: cmd || "status", opts };
 }
 
 const { cmd, opts } = parseArgs(process.argv);
+REPO_ROOT = resolveRepoRoot(opts.repo);
+
+if (opts.version) {
+  console.log(`bob-tuner ${CLI_VERSION} (node fallback)`);
+  process.exit(0);
+}
+if (opts.help || cmd === "help") {
+  printHelp();
+  process.exit(0);
+}
+
 if (cmd === "sync") syncCommand(opts);
 else if (cmd === "validate") validateCommand();
 else if (cmd === "dlp-audit") dlpAuditCommand();
+else if (cmd === "mcp") mcpCommand();
 else if (cmd === "backup") console.log("[OK] SHA-256 backup saved at:", backupSettings());
 else if (cmd === "set-model") {
+  if (opts.model === undefined) {
+    console.error("[ERROR] Missing required argument <MODEL>. Usage: bob-tuner set-model <claude-opus-4-6|default>");
+    process.exit(2);
+  }
   const bak = backupSettings();
   const sp = path.join(HOME, ".bob", "settings", "settings.json");
   const obj = fs.existsSync(sp) ? JSON.parse(fs.readFileSync(sp, "utf8")) : {};
-  const raw = (opts.model || "").trim();
+  const raw = opts.model.trim();
   const norm = !raw || raw.toLowerCase() === "default" || raw.toLowerCase() === "premium-ide" ? "" : raw;
-  obj.session = { ...(obj.session || {}), model: norm };
+  const prevSession = obj.session && typeof obj.session === "object" && !Array.isArray(obj.session) ? obj.session : {};
+  obj.session = { ...prevSession, model: norm };
   writeAtomic(sp, JSON.stringify(obj, null, 2) + "\n");
   console.log(`[OK] session.model updated to ${norm || '"" (default: premium-ide)'} (backup: ${bak})`);
 } else if (cmd === "status") {
-  const sp = path.join(HOME, ".bob", "settings", "settings.json");
-  const mp = path.join(HOME, ".bob", "settings", "mcp.json");
-  const cm = path.join(HOME, ".bob", "settings", "custom_modes.yaml");
-  console.log("IBM BOB STATUS:", {
-    settings: fs.existsSync(sp) ? sp : "MISSING",
-    custom_modes: fs.existsSync(cm) ? cm : "MISSING",
-    mcp: fs.existsSync(mp) ? Object.keys(JSON.parse(fs.readFileSync(mp, "utf8")).mcpServers || {}) : "MISSING",
-  });
+  statusCommand(opts);
 } else {
   console.error(`Unknown command: ${cmd}`);
+  printHelp();
   process.exit(2);
 }

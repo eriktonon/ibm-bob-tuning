@@ -91,7 +91,7 @@ Verify **all 5 surfaces** after Step 2 completes:
 
 Run the built-in status check:
 - **Windows:** `if (Test-Path .\target\release\bob-tuner.exe) { .\target\release\bob-tuner.exe status } else { node .\scripts\bob-sync.mjs status }`
-- **macOS / Linux:** `if [ -x ./target/release/bob-tuner ]; then ./target/release/bob-tuner status; else node ./scripts/bob-sync.mjs status; fi`
+- **macOS / Linux:** `if command -v bob-tuner >/dev/null 2>&1; then bob-tuner status; elif [ -x "$HOME/.local/bin/bob-tuner" ]; then "$HOME/.local/bin/bob-tuner" status; else node ./scripts/bob-sync.mjs status; fi`
 
 ---
 
