@@ -41,7 +41,7 @@ cd ibm-bob-tuning
 ./scripts/install.sh --workspace "/path/to/your/project"
 ```
 
-> **Note:** On Windows, `install.ps1` automatically adds `%USERPROFILE%\.cargo\bin` to `PATH`, auto-bootstraps a self-contained Rust GNU toolchain (`x86_64-pc-windows-gnu` + `llvm-tools`, without requiring 4.5 GB Visual Studio C++ Build Tools) when `cargo` is missing, compiles `bob-tuner.exe`, and installs it globally into `%USERPROFILE%\.cargo\bin\bob-tuner.exe` so `bob-tuner` works from any folder. If offline or `--skip-rust` is passed, it automatically runs the zero-dependency Node.js engine (`scripts/bob-sync.mjs`) with identical output.
+> **Note:** On Windows, `install.ps1` automatically adds `%USERPROFILE%\.cargo\bin` to `PATH`, auto-bootstraps a self-contained Rust GNU toolchain (`x86_64-pc-windows-gnu` + `llvm-tools`, without requiring 4.5 GB Visual Studio C++ Build Tools) when `cargo` is missing, compiles `bob-tuner.exe`, and installs it globally into `%USERPROFILE%\.cargo\bin\bob-tuner.exe` so `bob-tuner` works from any folder. On macOS/Linux, `install.sh` installs `bob-tuner` globally into `~/.local/bin/bob-tuner` (using the native Rust binary when `cargo` is available, or a zero-dependency Node.js CLI wrapper when `cargo` is missing or `--skip-rust` is passed) and persists `~/.local/bin` in your shell profile (`~/.zshrc`, `~/.bash_profile`, or `~/.bashrc`) when needed.
 
 ### Final Step Inside IBM Bob IDE
 1. Press `Ctrl+Shift+P` (or `Cmd+Shift+P` on macOS) → **`Developer: Reload Window`** (initializes the newly registered global MCP servers).
@@ -51,7 +51,7 @@ cd ibm-bob-tuning
 
 ## CLI Commands Reference
 
-Once installed, `bob-tuner` is available globally in `~/.cargo/bin` (and records the repository location in `~/.bob/settings/.repo-root` + `BOB_TUNING_REPO`), so you can run it from **any directory** (or use `node scripts/bob-sync.mjs` from the repository root):
+Once installed, `bob-tuner` is available globally (`%USERPROFILE%\.cargo\bin` on Windows, `~/.local/bin` on macOS/Linux) and records the repository location in `~/.bob/settings/.repo-root` + `BOB_TUNING_REPO`, so you can run it from **any directory** (or use `node scripts/bob-sync.mjs` from the repository root):
 
 ```bash
 # Audit current IBM Bob configuration (works from any directory)
